@@ -1,0 +1,1656 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+/* eslint-disable no-multi-assign */
+const ModuleManager_1 = require("./ModuleManager");
+const chai_1 = require("chai");
+const path = require("path");
+const util_1 = require("../util");
+const TestHelpers_spec_1 = require("../TestHelpers.spec");
+const fsExtra = require("fs-extra");
+const InstallCommand_1 = require("../commands/InstallCommand");
+const cwd = process.cwd();
+const hostDir = path.join(cwd, '.tmp', 'hostApp');
+describe('ModuleManager', () => {
+    let manager;
+    let noprefixNpmAliases;
+    beforeEach(() => {
+        manager = new ModuleManager_1.ModuleManager();
+        noprefixNpmAliases = [];
+    });
+    async function managerProcess() {
+        manager.hostDependencies = await util_1.util.getModuleDependencies(hostDir);
+        manager.noprefixNpmAliases = noprefixNpmAliases;
+        await manager.process();
+    }
+    async function createDependencies(dependencies) {
+        manager.modules = TestHelpers_spec_1.createProjects(hostDir, hostDir, {
+            name: 'host',
+            dependencies: dependencies
+        });
+        await Promise.all(manager.modules.map(x => x.init()));
+        return manager.modules;
+    }
+    describe('getReducedDependencies', () => {
+        it('does not throw for zero modules', () => {
+            chai_1.expect(manager.getReducedDependencies()).to.eql([]);
+        });
+        it('generates simple 1-1 map for modules', async () => {
+            await createDependencies([{
+                    name: 'promise'
+                }]);
+            await managerProcess();
+            chai_1.expect(manager.getReducedDependencies()).to.eql([{
+                    npmModuleName: 'promise',
+                    dominantVersion: '1',
+                    version: '1.0.0',
+                    ropmModuleName: 'promise'
+                }]);
+        });
+        it('ignores the alias for non-host module dependencies', async () => {
+            await createDependencies([{
+                    name: 'logger',
+                    dependencies: [{
+                            alias: 'p',
+                            name: 'promise'
+                        }]
+                }]);
+            await managerProcess();
+            chai_1.expect(manager.getReducedDependencies().filter(x => x.npmModuleName === 'promise')).to.eql([{
+                    npmModuleName: 'promise',
+                    dominantVersion: '1',
+                    version: '1.0.0',
+                    ropmModuleName: 'promise_v1'
+                }]);
+        });
+        it('adds version postfix for non-host dependencies', async () => {
+            await createDependencies([{
+                    name: 'logger',
+                    dependencies: [{
+                            name: 'promise',
+                            version: '1.0.0',
+                            dependencies: [{
+                                    name: 'promise',
+                                    version: '2.0.0'
+                                }]
+                        }]
+                }]);
+            await managerProcess();
+            chai_1.expect(manager.getReducedDependencies().filter(x => x.npmModuleName !== 'logger').sort((a, b) => a.dominantVersion.localeCompare(b.dominantVersion))).to.eql([{
+                    npmModuleName: 'promise',
+                    dominantVersion: '1',
+                    version: '1.0.0',
+                    ropmModuleName: 'promise_v1'
+                }, {
+                    npmModuleName: 'promise',
+                    dominantVersion: '2',
+                    version: '2.0.0',
+                    ropmModuleName: 'promise_v2'
+                }]);
+        });
+        it('uses the host alias when present', async () => {
+            await createDependencies([{
+                    alias: 'q',
+                    name: 'promise',
+                    version: '1.2.3'
+                }, {
+                    name: 'promise',
+                    version: '2.0.0'
+                }]);
+            await managerProcess();
+            chai_1.expect(manager.getReducedDependencies().sort((a, b) => a.dominantVersion.localeCompare(b.dominantVersion))).to.eql([{
+                    npmModuleName: 'promise',
+                    dominantVersion: '1',
+                    version: '1.2.3',
+                    ropmModuleName: 'q'
+                }, {
+                    npmModuleName: 'promise',
+                    dominantVersion: '2',
+                    version: '2.0.0',
+                    ropmModuleName: 'promise'
+                }]);
+        });
+        it('retains preversion versions', async () => {
+            await createDependencies([{
+                    name: 'cool-package',
+                    version: '4.0.0-b4'
+                }]);
+            chai_1.expect(manager.getReducedDependencies().sort((a, b) => a.dominantVersion.localeCompare(b.dominantVersion))).to.eql([{
+                    npmModuleName: 'cool-package',
+                    dominantVersion: '4.0.0-b4',
+                    version: '4.0.0-b4',
+                    ropmModuleName: 'coolpackage_v4_0_0_b4'
+                }]);
+        });
+        it('does not de-dupe prerelease versions', async () => {
+            await createDependencies([{
+                    name: 'cool-package',
+                    version: '1.0.0-b1',
+                    dependencies: [{
+                            name: 'cool-package',
+                            version: '1.0.0-b2'
+                        }]
+                }]);
+            chai_1.expect(manager.getReducedDependencies().sort((a, b) => a.dominantVersion.localeCompare(b.dominantVersion))).to.eql([{
+                    npmModuleName: 'cool-package',
+                    dominantVersion: '1.0.0-b1',
+                    version: '1.0.0-b1',
+                    ropmModuleName: 'coolpackage_v1_0_0_b1'
+                }, {
+                    npmModuleName: 'cool-package',
+                    dominantVersion: '1.0.0-b2',
+                    version: '1.0.0-b2',
+                    ropmModuleName: 'coolpackage_v1_0_0_b2'
+                }]);
+        });
+    });
+    describe('reduceModules', () => {
+        it('does not remove unique dependencies', async () => {
+            await createDependencies([{
+                    alias: 'p1',
+                    name: 'promise',
+                    version: '1.0.0'
+                }, {
+                    alias: 'p2',
+                    name: 'promise',
+                    version: '2.0.0'
+                }]);
+            await managerProcess();
+            await manager.reduceModulesAndCreatePrefixMaps();
+            chai_1.expect(manager.modules.map(x => [x.npmModuleName, x.version])).to.eql([
+                ['promise', '1.0.0'],
+                ['promise', '2.0.0']
+            ]);
+        });
+        it('removes unnecessary dependencies', async () => {
+            await createDependencies([{
+                    alias: 'p1',
+                    name: 'promise',
+                    version: '1.0.0'
+                }, {
+                    alias: 'p2',
+                    name: 'promise',
+                    version: '1.1.0'
+                }, {
+                    alias: 'p3',
+                    name: 'promise',
+                    version: '1.2.0'
+                }, {
+                    alias: 'p4',
+                    name: 'promise',
+                    version: '2.0.0'
+                }]);
+            await managerProcess();
+            await manager.reduceModulesAndCreatePrefixMaps();
+            chai_1.expect(manager.modules.map(x => [x.npmModuleName, x.version])).to.eql([
+                ['promise', '1.2.0'],
+                ['promise', '2.0.0']
+            ]);
+        });
+    });
+    describe('process', () => {
+        it('replaces ROPM_PREFIX source literal', async () => {
+            const [logger] = await createDependencies([{
+                    name: 'logger'
+                }]);
+            //don't rewrite parameters or variables on lhs of assignments
+            //DO rewrite variables used elsewhere
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/source/lib.brs`, `
+                sub log(ROPM_PREFIX = "")
+                    ROPM_PREFIX = ""
+                    print ROPM_PREFIX + "ROPM_PREFIX"
+                end sub
+            `);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/lib.brs`, `
+                sub logger_log(ROPM_PREFIX = "")
+                    ROPM_PREFIX = ""
+                    print "logger_" + "ROPM_PREFIX"
+                end sub
+            `);
+        });
+        /**
+         * This test converts the dependency name "module1" to "module2", and names this package "module1"
+         */
+        it('handles module prefix swapping', async () => {
+            await createDependencies([{
+                    alias: 'logger',
+                    name: 'simple-logger',
+                    dependencies: [{
+                            alias: 'logger',
+                            name: 'complex-logger'
+                        }]
+                }]);
+            //simple-logger calls method from complex-logger, aliased as `logger`
+            TestHelpers_spec_1.file(`${hostDir}/node_modules/logger/source/main.brs`, `
+                sub WriteToLog(message)
+                    return logger_writeToLog(message)
+                end sub
+            `);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/main.brs`, `
+                sub logger_WriteToLog(message)
+                    return complexlogger_v1_writeToLog(message)
+                end sub
+            `);
+        });
+        it('applies a prefix to all functions of a program', async () => {
+            const [logger] = await createDependencies([{
+                    name: 'logger'
+                }]);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/source/main.brs`, `
+                sub main()
+                    SanitizeText("123")
+                end sub
+                sub SanitizeText(text as string)
+                    PrintMessage("Sanitizing text: " + text)
+                end sub
+            `);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/source/lib.brs`, `
+                sub PrintMessage(message)
+                    print message
+                end sub
+            `);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/main.brs`, `
+                sub main()
+                    logger_SanitizeText("123")
+                end sub
+                sub logger_SanitizeText(text as string)
+                    logger_PrintMessage("Sanitizing text: " + text)
+                end sub
+            `);
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/lib.brs`, `
+                sub logger_PrintMessage(message)
+                    print message
+                end sub
+            `);
+        });
+        it('does not prefix special functions', async () => {
+            const [logger] = await createDependencies([{
+                    name: 'logger'
+                }]);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/source/main.brs`, `
+                sub runuserinterface()
+                end sub
+
+                sub main()
+                end sub
+
+                sub runscreensaver()
+                end sub
+
+                sub init()
+                end sub
+
+                function onkeyevent()
+                end function
+
+                sub NonSpecialFunction()
+                end sub
+            `);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/main.brs`, `
+                sub runuserinterface()
+                end sub
+
+                sub main()
+                end sub
+
+                sub runscreensaver()
+                end sub
+
+                sub init()
+                end sub
+
+                function onkeyevent()
+                end function
+
+                sub logger_NonSpecialFunction()
+                end sub
+            `);
+        });
+        it('applies function prefixes after leading underscores', async () => {
+            const [logger] = await createDependencies([{
+                    name: 'logger'
+                }]);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/source/main.brs`, `
+                sub main()
+                    _sub1()
+                end sub
+                sub _sub1()
+                    __Sub2()
+                end sub
+                sub __Sub2()
+                end sub
+            `);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/main.brs`, `
+                sub main()
+                    _logger_sub1()
+                end sub
+                sub _logger_sub1()
+                    __logger_Sub2()
+                end sub
+                sub __logger_Sub2()
+                end sub
+            `);
+        });
+        it('applies a prefix to components and their usage', async () => {
+            const [logger] = await createDependencies([{
+                    name: 'logger'
+                }]);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/components/Component1.xml`, TestHelpers_spec_1.trim `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1" extends="Component2" >
+                </component>
+            `);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/components/Component2.xml`, TestHelpers_spec_1.trim `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component2" extends="Task" >
+                    <children>
+                        <Component1 />
+                        <Component2>
+                        </Component2>
+                    </children>
+                </component>
+            `);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/source/main.brs`, `
+                sub main()
+                    comp = CreateObject("rosgnode", "Component1")
+                    comp.CreateChild("Component2")
+                end sub
+            `);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/components/roku_modules/logger/Component1.xml`, `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="logger_Component1" extends="logger_Component2" >
+                </component>
+            `);
+            TestHelpers_spec_1.fsEqual(`${hostDir}/components/roku_modules/logger/Component2.xml`, `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="logger_Component2" extends="Task" >
+                    <children>
+                        <logger_Component1 />
+                        <logger_Component2>
+                        </logger_Component2>
+                    </children>
+                </component>
+            `);
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/main.brs`, `
+                sub main()
+                    comp = CreateObject("rosgnode", "logger_Component1")
+                    comp.CreateChild("logger_Component2")
+                end sub
+            `);
+        });
+        it('renames dependency prefixes', async () => {
+            const [logger] = await createDependencies([{
+                    alias: 'logger',
+                    name: '@alpha/logger',
+                    dependencies: [{
+                            alias: 'logger',
+                            name: '@bravo/printer'
+                        }]
+                }]);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/source/main.brs`, `
+                sub PrintValue(value)
+                    print logger_writeLine(value)
+                end sub
+            `);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/main.brs`, `
+                sub logger_PrintValue(value)
+                    print bravo_printer_v1_writeLine(value)
+                end sub
+            `);
+        });
+        it('does not prefix object function calls with same name as scope function', async () => {
+            await createDependencies([{
+                    name: 'logger',
+                    _files: {
+                        'source/lib.brs': `
+                        sub getPerson()
+                            person = {
+                                speak: sub(message)
+                                    print message
+                                end sub,
+                                sayHello: sub()
+                                    m.speak("Hello")
+                                    speak("Person said hello")
+                                end sub
+                            }
+                            person.speak("I'm a person")
+                            person["speak"]("I'm a person")
+                            speak("Made person speak")
+                        end sub
+                        sub speak(message)
+                            print message
+                        end sub
+                    `
+                    }
+                }]);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/lib.brs`, `
+                sub logger_getPerson()
+                    person = {
+                        speak: sub(message)
+                            print message
+                        end sub,
+                        sayHello: sub()
+                            m.speak("Hello")
+                            logger_speak("Person said hello")
+                        end sub
+                    }
+                    person.speak("I'm a person")
+                    person["speak"]("I'm a person")
+                    logger_speak("Made person speak")
+                end sub
+                sub logger_speak(message)
+                    print message
+                end sub
+            `);
+        });
+        it('applies prefix when in expanded mode', async () => {
+            await createDependencies([{
+                    name: 'logger',
+                    _files: {
+                        'source/lib.brs': `
+                        sub writeToLog(message)
+                            logFunc = logWarning
+                            logFunc(message)
+                        end sub
+                        sub logWarning(message)
+                            print message
+                        end sub
+                    `
+                    }
+                }]);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/lib.brs`, `
+                sub logger_writeToLog(message)
+                    logFunc = logger_logWarning
+                    logFunc(message)
+                end sub
+                sub logger_logWarning(message)
+                    print message
+                end sub
+            `);
+        });
+        it('only prefixes calls to known own functions', async () => {
+            await createDependencies([{
+                    name: 'logger',
+                    _files: {
+                        'source/lib.brs': `
+                        sub logWarning(message)
+                            log(message, "warning")
+                            'should not get prefixed
+                            notMyModuleFunction()
+                        end sub
+                        sub log(message, errorLevel)
+                            print errorLevel + ": " + message
+                        end sub
+                    `
+                    }
+                }]);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/lib.brs`, `
+                sub logger_logWarning(message)
+                    logger_log(message, "warning")
+                    'should not get prefixed
+                    notMyModuleFunction()
+                end sub
+                sub logger_log(message, errorLevel)
+                    print errorLevel + ": " + message
+                end sub
+            `);
+        });
+        describe('prefixing observeField and observeFieldScoped', () => {
+            async function testObserveField(testLine, expectedLine = testLine) {
+                const fileContents = TestHelpers_spec_1.trim `
+                    sub init()
+                        ${testLine}
+                    end sub
+                    sub logInfo()
+                    end sub
+                `;
+                await createDependencies([{
+                        name: 'logger',
+                        _files: {
+                            'source/lib.brs': fileContents
+                        }
+                    }]);
+                await managerProcess();
+                TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/lib.brs`, TestHelpers_spec_1.trim `
+                    sub init()
+                        ${expectedLine}
+                    end sub
+                    sub logger_logInfo()
+                    end sub
+                `);
+            }
+            it('does not prefix because not an object call', async () => {
+                //no change because it's not on an object
+                await testObserveField(`observeField("field", "logInfo")`);
+                await testObserveField(`observeFieldScoped("field", "logInfo")`);
+            });
+            it('does not prefix because not a string literal', async () => {
+                //no change because the second parameter is not a string
+                await testObserveField(`m.top.observeField("field", callbackName)`);
+                await testObserveField(`m.top.observeFieldScoped("field", callbackName)`);
+            });
+            it('does not prefix because references unknown function name', async () => {
+                //no change because the second parameter is not a string
+                await testObserveField(`m.top.observeField("field", "unknownFunctionName")`);
+                await testObserveField(`m.top.observeFieldScoped("field", "unknownFunctionName")`);
+            });
+            it('does not prefix multi-line first param', async () => {
+                //no change because the second parameter is not a string
+                await testObserveField(`m.top.observeField(getField({
+                    name: "something"
+                }, "unknownFunctionName")`);
+                await testObserveField(`m.top.observeFieldScoped(getField({
+                    name: "something"
+                }, "unknownFunctionName")`);
+            });
+            it('does not prefix multi-line with function call at end of first line', async () => {
+                await testObserveField(`m.top.observeField({name: getName("bob")
+                        age: 12
+                    }, "logInfo")
+                `);
+                await testObserveField(`m.top.observeFieldScoped({name: getName("bob")
+                        age: 12
+                    }, "logInfo")
+                `);
+            });
+            it('prefixes object call with string literal', async () => {
+                await testObserveField(`m.top.observeField("field", "logInfo")`, `m.top.observeField("field", "logger_logInfo")`);
+                await testObserveField(`m.top.observeFieldScoped("field", "logInfo")`, `m.top.observeFieldScoped("field", "logger_logInfo")`);
+            });
+            it('prefixes even with complex ', async () => {
+                await testObserveField(`m.top.observeField("field", "logInfo")`, `m.top.observeField("field", "logger_logInfo")`);
+                await testObserveField(`m.top.observeFieldScoped("field", "logInfo")`, `m.top.observeFieldScoped("field", "logger_logInfo")`);
+            });
+            it('prefixes with trailing comment', async () => {
+                await testObserveField(`m.top.observeField("field", "logInfo") 'comment`, `m.top.observeField("field", "logger_logInfo") 'comment`);
+                await testObserveField(`m.top.observeFieldScoped("field", "logInfo") 'comment`, `m.top.observeFieldScoped("field", "logger_logInfo") 'comment`);
+            });
+        });
+        it('does not prefix inner-function function calls', async () => {
+            await createDependencies([{
+                    name: 'logger',
+                    _files: {
+                        'source/lib.brs': `
+                        sub logWarning(message)
+                            doSomething = sub()
+                            end sub
+
+                            doSomething()
+                        end sub
+                    `
+                    }
+                }]);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/lib.brs`, `
+                sub logger_logWarning(message)
+                    doSomething = sub()
+                    end sub
+
+                    doSomething()
+                end sub
+            `);
+        });
+        it('rewrites script paths for own package', async () => {
+            const [logger] = await createDependencies([{
+                    name: 'logger'
+                }]);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/source/common.brs`, `
+                sub echo(message)
+                    print message
+                end sub
+            `);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/components/common.brs`, `
+                sub echo(message)
+                    print message
+                end sub
+            `);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/components/Component1.xml`, TestHelpers_spec_1.trim `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1">
+                    <script uri="pkg:/source/common.brs" />
+                    <script uri="common.brs" />
+                    <script uri="./common.brs" />
+                    <script uri="../components/common.brs" />
+                </component>
+            `);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/components/roku_modules/logger/Component1.xml`, `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="logger_Component1">
+                    <script uri="pkg:/source/roku_modules/logger/common.brs" />
+                    <script uri="pkg:/components/roku_modules/logger/common.brs" />
+                    <script uri="pkg:/components/roku_modules/logger/common.brs" />
+                    <script uri="pkg:/components/roku_modules/logger/common.brs" />
+                </component>
+            `);
+        });
+        it('skips roku_modules folders found in module folders', async () => {
+            const promise = (await createDependencies([{
+                    name: 'logger',
+                    dependencies: [{
+                            name: 'promise'
+                        }]
+                }]))[1];
+            // the jsonlib package forgot to exclude its roku_modules folder
+            TestHelpers_spec_1.file(`${promise.packageRootDir}/source/roku_modules/jsonlib/json.brs`, ``);
+            await managerProcess();
+            //ropm should have IGNORED the roku_modules folder from the promise package
+            chai_1.expect(fsExtra.pathExistsSync(`${hostDir}/source/roku_modules/promise_v1/roku_modules/jsonlib/json.brs`)).to.be.false;
+        });
+        it('rewrites script references to dependency files', async () => {
+            const [logger, promise] = await createDependencies([{
+                    name: 'logger',
+                    dependencies: [{
+                            name: 'promise'
+                        }]
+                }]);
+            TestHelpers_spec_1.file(`${promise.packageRootDir}/source/promise.brs`, ``);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/components/Component1.xml`, TestHelpers_spec_1.trim `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1">
+                    <script uri="pkg:/source/roku_modules/promise/promise.brs" />
+                    <script uri="../source/roku_modules/promise/promise.brs" />
+                </component>
+            `);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/components/roku_modules/logger/Component1.xml`, `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="logger_Component1">
+                    <script uri="pkg:/source/roku_modules/promise_v1/promise.brs" />
+                    <script uri="pkg:/source/roku_modules/promise_v1/promise.brs" />
+                </component>
+            `);
+        });
+        it('rewrites <Poster> file paths', async () => {
+            const [logger, photolib] = await createDependencies([{
+                    name: 'logger',
+                    dependencies: [{
+                            name: 'photolib'
+                        }]
+                }]);
+            TestHelpers_spec_1.file(`${photolib.packageRootDir}/images/picture.jpg`, ``);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/components/Component1.xml`, TestHelpers_spec_1.trim `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1">
+                    <children>
+                        <Poster uri="pkg:/images/photo.jpg" />
+                        <!--dependency paths-->
+                        <Poster uri="pkg:/images/roku_modules/photolib/photo.jpg" />
+                    </children>
+                </component>
+            `);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/components/roku_modules/logger/Component1.xml`, `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="logger_Component1">
+                    <children>
+                        <Poster uri="pkg:/images/roku_modules/logger/photo.jpg" />
+                        <!--dependency paths-->
+                        <Poster uri="pkg:/images/roku_modules/photolib_v1/photo.jpg" />
+                    </children>
+                </component>
+            `);
+        });
+        it('does not rewrite simple "pkg:/" paths with nothing else in it', async () => {
+            const [logger] = await createDependencies([{
+                    name: 'logger'
+                }]);
+            TestHelpers_spec_1.file(`${logger.packageRootDir}/source/common.brs`, `
+                sub GetImagePath(imageName)
+
+                    'will be rewritten because we have content after 'pkg:/'
+                    image1 = "pkg:/images/" + imageName
+
+                    'will not be rewritten because the 'pkg:/' is isolated
+                    image2 = "pkg:/" + "images/" + imageName
+
+                end sub
+            `);
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/common.brs`, `
+                sub logger_GetImagePath(imageName)
+
+                    'will be rewritten because we have content after 'pkg:/'
+                    image1 = "pkg:/images/roku_modules/logger/" + imageName
+
+                    'will not be rewritten because the 'pkg:/' is isolated
+                    image2 = "pkg:/" + "images/" + imageName
+
+                end sub
+            `);
+        });
+        it('supports a package using both rootDir and packageRootDir', async () => {
+            const [logger, photolib] = await createDependencies([{
+                    name: 'logger',
+                    ropm: {
+                        rootDir: 'src',
+                        packageRootDir: 'dist'
+                    },
+                    dependencies: [{
+                            name: 'photolib'
+                        }]
+                }]);
+            TestHelpers_spec_1.file(`${logger.moduleDir}/dist/source/logger_dist.brs`, ``);
+            TestHelpers_spec_1.file(`${photolib.packageRootDir}/source/photolib.brs`, '');
+            //run install on the logger module, which should put logger's dependencies into logger's rootDir
+            let command = new InstallCommand_1.InstallCommand({
+                cwd: logger.moduleDir
+            });
+            await command.run();
+            chai_1.expect(fsExtra.pathExistsSync(`${logger.moduleDir}/src/source/roku_modules/photolib/photolib.brs`)).to.be.true;
+            //now run npm install on the host app, which should read logger's packageRootDir path and use those files
+            command = new InstallCommand_1.InstallCommand({
+                cwd: hostDir
+            });
+            await command.run();
+            chai_1.expect(fsExtra.pathExistsSync(`${hostDir}/source/roku_modules/logger/logger_dist.brs`)).to.be.true;
+        });
+        it('keeps custom prefix for one module when using noprefix for another', async () => {
+            noprefixNpmAliases = ['json-lib'];
+            manager.modules = TestHelpers_spec_1.createProjects(hostDir, hostDir, {
+                name: 'host',
+                dependencies: [{
+                        name: 'logger',
+                        alias: 'l',
+                        _files: {
+                            'source/loggerlib.brs': `
+                            sub logInfo(message)
+                                print message
+                            end sub
+                        `
+                        }
+                    }, {
+                        name: 'json-lib',
+                        _files: {
+                            'source/jsonlib.brs': `
+                            sub parseJson(text)
+                                return {}
+                            end sub
+
+                            sub anotherFunction()
+                                test = parseJson
+                            end sub
+                        `
+                        }
+                    }]
+            });
+            await managerProcess();
+            //the logger module should use the "l" prefix
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/l/loggerlib.brs`, `
+                sub l_logInfo(message)
+                    print message
+                end sub
+            `);
+            //the json lib should NOT be prefixed
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/jsonlib/jsonlib.brs`, `
+                sub parseJson(text)
+                    return {}
+                end sub
+
+                sub anotherFunction()
+                    test = parseJson
+                end sub
+            `);
+        });
+        it('supports a package using both rootDir and packageRootDir', async () => {
+            noprefixNpmAliases = ['logger'];
+            manager.modules = TestHelpers_spec_1.createProjects(hostDir, hostDir, {
+                name: 'host',
+                dependencies: [{
+                        name: 'logger',
+                        _files: {
+                            'source/loggerlib.brs': `
+                            sub logInfo(message)
+                                print message
+                            end sub
+                        `,
+                            'components/loggercomp.xml': TestHelpers_spec_1.trim `
+                            <?xml version="1.0" encoding="utf-8" ?>
+                            <component name="loggercomp"></component>
+                        `
+                        }
+                    }, {
+                        name: 'json',
+                        _files: {
+                            'source/jsonlib.brs': `
+                            sub parseJson(text)
+                                return {}
+                            end sub
+                        `,
+                            'components/jsoncomp.xml': TestHelpers_spec_1.trim `
+                            <?xml version="1.0" encoding="utf-8" ?>
+                            <component name="jsoncomp">
+                            </component>
+                        `
+                        }
+                    }]
+            });
+            await managerProcess();
+            //the logger module should have no prefixes applied to its functions or components
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/loggerlib.brs`, `
+                sub logInfo(message)
+                    print message
+                end sub
+            `);
+            TestHelpers_spec_1.fsEqual(`${hostDir}/components/roku_modules/logger/loggercomp.xml`, TestHelpers_spec_1.trim `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="loggercomp"></component>
+            `);
+            //the json module should be prefixed
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/json/jsonlib.brs`, `
+                sub json_parseJson(text)
+                    return {}
+                end sub
+            `);
+            TestHelpers_spec_1.fsEqual(`${hostDir}/components/roku_modules/json/jsoncomp.xml`, TestHelpers_spec_1.trim `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="json_jsoncomp">
+                </component>
+            `);
+        });
+        it('supports a package using both rootDir and packageRootDir', async () => {
+            noprefixNpmAliases = ['logger'];
+            manager.modules = TestHelpers_spec_1.createProjects(hostDir, hostDir, {
+                name: 'host',
+                dependencies: [{
+                        name: 'logger',
+                        _files: {
+                            'source/loggerlib.brs': `
+                            sub logInfo(message)
+                                print message
+                            end sub
+                        `,
+                            'components/loggercomp.xml': TestHelpers_spec_1.trim `
+                            <?xml version="1.0" encoding="utf-8" ?>
+                            <component name="loggercomp"></component>
+                        `
+                        }
+                    }, {
+                        name: 'json',
+                        _files: {
+                            'source/jsonlib.brs': `
+                            sub parseJson(text)
+                                return {}
+                            end sub
+                        `,
+                            'components/jsoncomp.xml': TestHelpers_spec_1.trim `
+                            <?xml version="1.0" encoding="utf-8" ?>
+                            <component name="jsoncomp">
+                            </component>
+                        `
+                        }
+                    }]
+            });
+            await managerProcess();
+            //the logger module should have no prefixes applied to its functions or components
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/loggerlib.brs`, `
+                sub logInfo(message)
+                    print message
+                end sub
+            `);
+            TestHelpers_spec_1.fsEqual(`${hostDir}/components/roku_modules/logger/loggercomp.xml`, TestHelpers_spec_1.trim `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="loggercomp"></component>
+            `);
+            //the json module should be prefixed
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/json/jsonlib.brs`, `
+                sub json_parseJson(text)
+                    return {}
+                end sub
+            `);
+            TestHelpers_spec_1.fsEqual(`${hostDir}/components/roku_modules/json/jsoncomp.xml`, TestHelpers_spec_1.trim `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="json_jsoncomp">
+                </component>
+            `);
+        });
+        it('supports a package using both rootDir and packageRootDir', async () => {
+            await TestHelpers_spec_1.testProcess({
+                noprefixNpmAliases: ['logger'],
+                'logger:source/loggerlib.brs': [
+                    TestHelpers_spec_1.trim `
+                        sub logInfo(message)
+                            print message
+                        end sub
+                    `,
+                    //the logger module should have no prefixes applied to its functions or components
+                    TestHelpers_spec_1.trim `
+                        sub logInfo(message)
+                            print message
+                        end sub
+                    `
+                ],
+                'logger:components/loggercomp1.xml': [
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="loggercomp1"></component>
+                    `,
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="loggercomp1"></component>
+                    `
+                ],
+                'logger:components/loggercomp2.xml': [
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="loggercomp2">
+                            <children>
+                                <!--reference component1 in component2 -->
+                                <loggercomp1></loggercomp1>
+                            </children>
+                        </component>
+                    `,
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="loggercomp2">
+                            <children>
+                                <!--reference component1 in component2 -->
+                                <loggercomp1></loggercomp1>
+                            </children>
+                        </component>
+                    `
+                ],
+                'json:source/jsonlib.brs': [
+                    TestHelpers_spec_1.trim `
+                        sub parseJson(text)
+                            return {}
+                        end sub
+                    `, TestHelpers_spec_1.trim `
+                        sub json_parseJson(text)
+                            return {}
+                        end sub
+                    `
+                ],
+                'json:components/jsoncomp.xml': [
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="jsoncomp">
+                        </component>
+                    `,
+                    //the json module should be prefixed
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="json_jsoncomp">
+                        </component>
+                    `
+                ]
+            });
+        });
+        it('rejects ropm module using `noprefix` when installed as a dependency', async () => {
+            manager.modules = TestHelpers_spec_1.createProjects(hostDir, hostDir, {
+                name: 'host',
+                dependencies: [{
+                        name: 'logger',
+                        ropm: {
+                            noprefix: ['smartlist']
+                        },
+                        dependencies: [{
+                                name: 'smartlist'
+                            }]
+                    }]
+            });
+            await managerProcess();
+            chai_1.expect(manager.modules.map(x => x.npmModuleName)).to.eql(['smartlist']);
+        });
+        it('rewrites referenced components in module', async () => {
+            manager.modules = TestHelpers_spec_1.createProjects(hostDir, hostDir, {
+                name: 'host',
+                dependencies: [{
+                        name: 'logger',
+                        _files: {
+                            'components/loggercomp.xml': TestHelpers_spec_1.trim `
+                            <?xml version="1.0" encoding="utf-8" ?>
+                            <component name="loggercomp">
+                                <children>
+                                    <l_SimpleList></l_SimpleList>
+                                </children>
+                            </component>
+                        `
+                        },
+                        dependencies: [{
+                                name: 'smartlist',
+                                alias: 'l'
+                            }]
+                    }]
+            });
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/components/roku_modules/logger/loggercomp.xml`, TestHelpers_spec_1.trim `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="logger_loggercomp">
+                    <children>
+                        <smartlist_v1_SimpleList></smartlist_v1_SimpleList>
+                    </children>
+                </component>
+            `);
+        });
+        it('does not prefix functions referenced by component interface', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:components/LoggerComponent.xml': [
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="LoggerComponent">
+                            <script uri="LoggerComponent.brs" />
+                            <interface>
+                                <function name="doSomething"/>
+                                <!--finds function with name on next line -->
+                                <function
+                                    name="doSomethingElse" />
+                            </interface>
+                        </component>
+                    `,
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="logger_LoggerComponent">
+                            <script uri="pkg:/components/roku_modules/logger/LoggerComponent.brs" />
+                            <interface>
+                                <function name="doSomething"/>
+                                <!--finds function with name on next line -->
+                                <function
+                                    name="doSomethingElse" />
+                            </interface>
+                        </component>
+                    `
+                ],
+                'logger:components/LoggerComponent.brs': [
+                    TestHelpers_spec_1.trim `
+                        sub doSomething()
+                        end sub
+                        sub doSomethingElse()
+                        end sub
+                        sub writeToLog()
+                        end sub
+                    `, TestHelpers_spec_1.trim `
+                        sub doSomething()
+                        end sub
+                        sub doSomethingElse()
+                        end sub
+                        sub logger_writeToLog()
+                        end sub
+                    `
+                ]
+            });
+        });
+        it('adds prefix to field onchange attributes', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:components/LoggerComponent.xml': [
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="LoggerComponent">
+                            <script uri="LoggerComponent.brs" />
+                            <interface>
+                                <field name="logMessage" onchange="logMessageChanged"/>
+                            </interface>
+                        </component>
+                    `,
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="logger_LoggerComponent">
+                            <script uri="pkg:/components/roku_modules/logger/LoggerComponent.brs" />
+                            <interface>
+                                <field name="logMessage" onchange="logger_logMessageChanged"/>
+                            </interface>
+                        </component>
+                    `
+                ],
+                'logger:components/LoggerComponent.brs': [
+                    TestHelpers_spec_1.trim `
+                        sub logMessageChanged()
+                        end sub
+                    `,
+                    TestHelpers_spec_1.trim `
+                        sub logger_logMessageChanged()
+                        end sub
+                    `
+                ]
+            });
+        });
+        it('does not prefix function calls to interface-referenced functions', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:components/LoggerComponent.xml': [
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="LoggerComponent">
+                            <script uri="LoggerComponent.brs" />
+                            <interface>
+                                <function name="doSomething" />
+                                <function name="notDefinedDoSomething" />
+                            </interface>
+                        </component>
+                    `,
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="logger_LoggerComponent">
+                            <script uri="pkg:/components/roku_modules/logger/LoggerComponent.brs" />
+                            <interface>
+                                <function name="doSomething" />
+                                <function name="notDefinedDoSomething" />
+                            </interface>
+                        </component>
+                    `
+                ],
+                'logger:components/LoggerComponent.brs': [
+                    TestHelpers_spec_1.trim `
+                        sub init()
+                            doSomething()
+                            isFunction(doSomething)
+                            isFunction(notDefinedDoSomething)
+                        end sub
+                        sub doSomething()
+                        end sub
+                    `,
+                    TestHelpers_spec_1.trim `
+                        sub init()
+                            doSomething()
+                            isFunction(doSomething)
+                            isFunction(notDefinedDoSomething)
+                        end sub
+                        sub doSomething()
+                        end sub
+                    `
+                ]
+            });
+        });
+        it('resolves import statements', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:source/lib.brs': [''],
+                'logger:components/LoggerComponent.d.bs': [
+                    TestHelpers_spec_1.trim `
+                        import "../source/lib.brs"
+                        import "pkg:/source/lib.brs"
+                    `,
+                    TestHelpers_spec_1.trim `
+                        import "pkg:/source/roku_modules/logger/lib.brs"
+                        import "pkg:/source/roku_modules/logger/lib.brs"
+                    `
+                ]
+            });
+        });
+        it('prefixes classes used in parameters', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:source/lib.d.bs': [
+                    TestHelpers_spec_1.trim `
+                        namespace animals
+                            class Dog
+                                sub new(brother as Dog, sister as animals.Dog, owner as Human)
+                                end sub
+                            end class
+                        end namespace
+
+                        class Human
+                        end class
+                    `,
+                    TestHelpers_spec_1.trim `
+                        namespace logger.animals
+                            class Dog
+                                sub new(brother as logger.animals.Dog, sister as logger.animals.Dog, owner as logger.Human)
+                                end sub
+                            end class
+                        end namespace
+
+                        namespace logger
+                        class Human
+                        end class
+                        end namespace
+                    `
+                ]
+            });
+        });
+        it('prefixes classes used in extends', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:source/lib.d.bs': [
+                    TestHelpers_spec_1.trim `
+                        namespace animals
+                            class Animal
+                            end class
+                            class Dog extends Animal
+                            end class
+                            class Cat extends animals.Animal
+                            end class
+                            class Warewolf extends Human
+                            end class
+                        end namespace
+                        class Human
+                        end class
+                        class Warecat extends animals.Cat
+                        end class
+                    `,
+                    TestHelpers_spec_1.trim `
+                        namespace logger.animals
+                            class Animal
+                            end class
+                            class Dog extends logger.animals.Animal
+                            end class
+                            class Cat extends logger.animals.Animal
+                            end class
+                            class Warewolf extends logger.Human
+                            end class
+                        end namespace
+                        namespace logger
+                        class Human
+                        end class
+                        end namespace
+                        namespace logger
+                        class Warecat extends logger.animals.Cat
+                        end class
+                        end namespace
+                    `
+                ]
+            });
+        });
+        it('prefixes classes used as return type', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:source/lib.d.bs': [
+                    TestHelpers_spec_1.trim `
+                        namespace animals
+                            class Dog
+                            end class
+                            function GetDog1() as Dog
+                            end function
+                            function GetDog2() as animals.Dog
+                            end function
+                            function GetHuman() as Human
+                            end function
+                        end namespace
+
+                        function GetDog3() as animals.Dog
+                        end function
+
+                        class Human
+                        end class
+                    `,
+                    TestHelpers_spec_1.trim `
+                        namespace logger.animals
+                            class Dog
+                            end class
+                            function GetDog1() as logger.animals.Dog
+                            end function
+                            function GetDog2() as logger.animals.Dog
+                            end function
+                            function GetHuman() as logger.Human
+                            end function
+                        end namespace
+
+                        namespace logger
+                        function GetDog3() as logger.animals.Dog
+                        end function
+                        end namespace
+
+                        namespace logger
+                        class Human
+                        end class
+                        end namespace
+                    `
+                ]
+            });
+        });
+        it('does not prefix other module namespaced class names', async () => {
+            manager.modules = TestHelpers_spec_1.createProjects(hostDir, hostDir, {
+                name: 'host',
+                dependencies: [{
+                        name: 'logger',
+                        _files: {
+                            'source/lib.d.bs': TestHelpers_spec_1.trim `
+                            class Person
+                                sub new(pet as a.Duck)
+                                end sub
+                                sub watchPetForFriend(friendPet as dogs.Poodle)
+                                end sub
+                            end class
+                        `
+                        },
+                        dependencies: [{
+                                name: 'animals',
+                                alias: 'a'
+                            }, {
+                                name: 'dogs'
+                            }]
+                    }]
+            });
+            await managerProcess();
+            TestHelpers_spec_1.fsEqual(`${hostDir}/source/roku_modules/logger/lib.d.bs`, `
+                namespace logger
+                class Person
+                    sub new(pet as animals_v1.Duck)
+                    end sub
+                    sub watchPetForFriend(friendPet as dogs_v1.Poodle)
+                    end sub
+                end class
+                end namespace
+            `);
+        });
+        it('properly handles annotations', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:source/lib.d.bs': [
+                    TestHelpers_spec_1.trim `
+                        @NameSpaceAnnotation
+                        namespace NameSpace
+                            @Sub1Annotation
+                            sub Sub1()
+                            end sub
+                        end namespace
+
+                        @Sub2Annotation
+                        sub Sub2()
+                        end sub
+
+                        @ClassAnnotation
+                        class Person
+                        end class
+                    `,
+                    TestHelpers_spec_1.trim `
+                        @NameSpaceAnnotation
+                        namespace logger.NameSpace
+                            @Sub1Annotation
+                            sub Sub1()
+                            end sub
+                        end namespace
+
+                        namespace logger
+                        @Sub2Annotation
+                        sub Sub2()
+                        end sub
+                        end namespace
+
+                        namespace logger
+                        @ClassAnnotation
+                        class Person
+                        end class
+                        end namespace
+                    `
+                ]
+            });
+        });
+        it('prefixes m.top.functionName for files NOT imported by a Task', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:source/lib.brs': [
+                    TestHelpers_spec_1.trim `
+                        sub a()
+                            m.top.functionName = "doSomething"
+                        end sub
+                    `,
+                    TestHelpers_spec_1.trim `
+                        sub logger_a()
+                            m.top.functionName = "logger_doSomething"
+                        end sub
+                    `
+                ]
+            });
+        });
+        it('prefixes direct task reference from component in same module', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:components/SimpleTask.brs': [
+                    TestHelpers_spec_1.trim `
+                        sub init()
+                            m.top.functionName = "doSomething"
+                        end sub
+                    `, TestHelpers_spec_1.trim `
+                        sub init()
+                            m.top.functionName = "logger_doSomething"
+                        end sub
+                    `
+                ],
+                //directly extends task
+                'logger:components/SimpleTask.xml': [
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="SimpleTask" extends="Task">
+                            <script uri="SimpleTask.brs" />
+                        </component>
+                    `
+                ]
+            });
+        });
+        it('prefixes indirect task reference from component in same module', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:components/HardTask.brs': [
+                    TestHelpers_spec_1.trim `
+                        sub init()
+                            m.top.functionName = "doSomething"
+                        end sub
+                    `, TestHelpers_spec_1.trim `
+                        sub init()
+                            m.top.functionName = "logger_doSomething"
+                        end sub
+                    `
+                ],
+                'logger:components/SimpleTask.xml': [
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="SimpleTask" extends="Task">
+                        </component>
+                    `
+                ], 'logger:components/HardTask.xml': [
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="HardTask" extends="SimpleTask">
+                            <script uri="HardTask.brs" />
+                        </component>
+                    `
+                ]
+            });
+        });
+        it('prefixes indirect task reference from component in different module', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:components/HardTask.brs': [
+                    TestHelpers_spec_1.trim `
+                        sub init()
+                            m.top.functionName = "doSomething"
+                        end sub
+                    `, TestHelpers_spec_1.trim `
+                        sub init()
+                            m.top.functionName = "logger_doSomething"
+                        end sub
+                    `
+                ],
+                'tasker:components/SimpleTask.xml': [
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="SimpleTask" extends="Task">
+                        </component>
+                    `
+                ], 'logger:components/HardTask.xml': [
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="HardTask" extends="tasker_SimpleTask">
+                            <script uri="HardTask.brs" />
+                        </component>
+                    `
+                ]
+            });
+        });
+        it('prefixes namespaces and not their child functions or classes', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:source/lib.d.bs': [
+                    TestHelpers_spec_1.trim `
+                        namespace util
+                            function doSomething()
+                            end function
+                            class Person
+                            end class
+                        end namespace
+                    `, TestHelpers_spec_1.trim `
+                        namespace logger.util
+                            function doSomething()
+                            end function
+                            class Person
+                            end class
+                        end namespace
+                    `
+                ]
+            });
+        });
+        it('ensures .brs files are parsed when d.bs files are present', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'l@logger:source/lib.d.bs': [
+                    TestHelpers_spec_1.trim `
+                        sub logWarning()
+                        end sub
+                        namespace util
+                            sub logError()
+                            end sub
+                        end namespace
+                    `
+                ],
+                'l@logger:source/lib.brs': [
+                    TestHelpers_spec_1.trim `
+                        sub logWarning()
+                        end sub
+                        sub util_logError()
+                        end sub
+                    `, TestHelpers_spec_1.trim `
+                        sub l_logWarning()
+                        end sub
+                        sub l_util_logError()
+                        end sub
+                    `
+                ]
+            });
+        });
+        it('wraps top-level functions and classes with a namespace', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:source/lib.d.bs': [
+                    TestHelpers_spec_1.trim `
+                        function doSomething()
+                        end function
+                        class Person
+                        end class
+                    `,
+                    TestHelpers_spec_1.trim `
+                        namespace logger
+                        function doSomething()
+                        end function
+                        end namespace
+                        namespace logger
+                        class Person
+                        end class
+                        end namespace
+                    `
+                ]
+            });
+        });
+        it('prefixes functions found inside IIFEs', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:source/main.brs': [
+                    `
+                        sub getResult()
+                            return (sub()
+                                print getName()
+                            end sub)()
+                        end sub
+                        function getName()
+                            return "name"
+                        end function
+                    `,
+                    `
+                        sub logger_getResult()
+                            return (sub()
+                                print logger_getName()
+                            end sub)()
+                        end sub
+                        function logger_getName()
+                            return "name"
+                        end function
+                    `
+                ]
+            });
+        });
+        it('does not wrap top-level non-namespaced functions that are referenced by component interface', async () => {
+            await TestHelpers_spec_1.testProcess({
+                'logger:components/comp.xml': [
+                    TestHelpers_spec_1.trim `
+                        <?xml version="1.0" encoding="utf-8" ?>
+                        <component name="LoggerComponent">
+                            <script uri="pkg:/source/lib.brs" />
+                            <interface>
+                                <function name="logWarning" />
+                            </interface>
+                        </component>
+                    `
+                ],
+                'logger:source/lib.d.bs': [
+                    TestHelpers_spec_1.trim `
+                        function logWarning()
+                        end function
+                        function logError()
+                        end function
+                    `,
+                    TestHelpers_spec_1.trim `
+                        function logWarning()
+                        end function
+                        namespace logger
+                        function logError()
+                        end function
+                        end namespace
+                    `
+                ],
+                'logger:source/lib.brs': [
+                    TestHelpers_spec_1.trim `
+                        function logWarning()
+                        end function
+                        function logError()
+                        end function
+                    `,
+                    TestHelpers_spec_1.trim `
+                        function logWarning()
+                        end function
+                        function logger_logError()
+                        end function
+                    `
+                ]
+            });
+        });
+        it('prevents loading and running bsc plugins during ropm install', async () => {
+            manager.modules = TestHelpers_spec_1.createProjects(hostDir, hostDir, {
+                name: 'host',
+                dependencies: [{
+                        name: 'logger',
+                        _files: {
+                            'source/loggerlib.brs': `
+                            sub logInfo(message)
+                                print message
+                            end sub
+                        `
+                        }
+                    }]
+            });
+            //create a bsc plugin for the lib
+            fsExtra.outputFileSync(`${hostDir}/node_modules/logger/plugin.js`, `
+                throw new Error('plugin loaded');
+                `);
+            fsExtra.outputFileSync(`${hostDir}/node_modules/logger/bsconfig.json`, JSON.stringify({
+                plugins: [
+                    './plugin.js'
+                ]
+            }));
+            //create a bsc plugin for the host
+            fsExtra.outputFileSync(`${hostDir}/plugin.js`, `
+                throw new Error('plugin loaded');
+            `);
+            fsExtra.outputFileSync(`${hostDir}/bsconfig.json`, JSON.stringify({
+                plugins: [
+                    './plugin.js'
+                ]
+            }));
+            try {
+                //change directory into hostDir to reproduce this issue
+                process.chdir(hostDir);
+                await managerProcess();
+            }
+            finally {
+                //restore cwd regardless of the test
+                process.chdir(cwd);
+            }
+            //loading the plugin causes an exception, so if no errors are thrown, this test was successful
+        });
+    });
+});
+//# sourceMappingURL=ModuleManager.spec.js.map

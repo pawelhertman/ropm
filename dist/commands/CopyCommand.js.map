@@ -1,0 +1,1 @@
+{"version":3,"file":"CopyCommand.js","sourceRoot":"","sources":["../../src/commands/CopyCommand.ts"],"names":[],"mappings":";;;AAAA,qDAAkD;AAElD,MAAa,WAAW;IACpB,YACW,IAAqB;QAArB,SAAI,GAAJ,IAAI,CAAiB;IAGhC,CAAC;IAEM,KAAK,CAAC,GAAG;QACZ,MAAM,cAAc,GAAG,IAAI,+BAAc,CAAC,IAAI,CAAC,IAAI,CAAC,CAAC;QACrD,MAAM,cAAc,CAAC,GAAG,CAAC,KAAK,CAAC,CAAC;IACpC,CAAC;CACJ;AAXD,kCAWC"}
