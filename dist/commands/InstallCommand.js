@@ -102,7 +102,7 @@ class InstallCommand {
         }
         let stdout;
         try {
-            stdout = childProcess.execSync('npm ls --parseable --prod --depth=99', {
+            stdout = childProcess.execSync('npm ls --parseable --depth=Invalid', {
                 cwd: this.cwd
             }).toString();
         }
