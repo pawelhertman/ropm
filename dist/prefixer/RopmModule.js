@@ -201,16 +201,13 @@ class RopmModule {
         const prefixMapKeys = Object.keys(this.prefixMap);
         const prefixMapKeysLower = prefixMapKeys.map(x => x.toLowerCase());
         /**
-         * Get the alias for a namespace. Only returns if it exists and is different than what is given.
+         * Get the alias for a namespace.
          */
         const getAlias = (namespace) => {
             if (namespace) {
                 const lowerNamespaceName = namespace.toLowerCase();
                 const idx = prefixMapKeysLower.indexOf(lowerNamespaceName);
-                const prefix = this.prefixMap[prefixMapKeys[idx]];
-                if (prefix && prefix.toLowerCase() !== lowerNamespaceName) {
-                    return prefix;
-                }
+                return this.prefixMap[prefixMapKeys[idx]];
             }
         };
         const nonPrefixedFunctionMap = Object.assign(Object.assign({}, this.nonPrefixedFunctionMap), this.getInterfaceFunctions());

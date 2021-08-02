@@ -117,12 +117,21 @@ class ModuleManager {
                     //use the highest version within this major range
                     version = semver.maxSatisfying([obj.highestVersion, (_b = hostDependency === null || hostDependency === void 0 ? void 0 : hostDependency.version) !== null && _b !== void 0 ? _b : '0.0.0'], '*');
                 }
+                let ropmModuleName;
+                if (hostDependency === null || hostDependency === void 0 ? void 0 : hostDependency.npmAlias) {
+                    ropmModuleName = util_1.util.getRopmNameFromModuleName(hostDependency.npmAlias);
+                }
+                else if (dominantVersions.length === 1) {
+                    ropmModuleName = util_1.util.getRopmNameFromModuleName(moduleName);
+                }
+                else {
+                    ropmModuleName = `${util_1.util.getRopmNameFromModuleName(moduleName)}_v${dominantVersionIdentifier}`;
+                }
                 result.push({
                     dominantVersion: dominantVersion.toString(),
                     npmModuleName: moduleName,
                     //use the hosts's alias, or default to the module name
-                    ropmModuleName: (hostDependency === null || hostDependency === void 0 ? void 0 : hostDependency.npmAlias) ? util_1.util.getRopmNameFromModuleName(hostDependency.npmAlias)
-                        : `${util_1.util.getRopmNameFromModuleName(moduleName)}_v${dominantVersionIdentifier}`,
+                    ropmModuleName: ropmModuleName,
                     version: version
                 });
             }
